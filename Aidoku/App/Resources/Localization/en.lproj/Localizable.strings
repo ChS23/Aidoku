@@ -876,3 +876,16 @@
 "TOGGLE_BARS" = "Toggle bar visibility";
 "CLOSE_READER" = "Close reader";
 "TOGGLE_PAGE_OFFSET" = "Toggle page offset";
+
+// MARK: - Parallel translation
+"PARALLEL_LINK" = "Link Translation";
+"PARALLEL_LINKED_TO" = "Linked To";
+"PARALLEL_UNLINK" = "Unlink";
+"PARALLEL_SEARCH_PLACEHOLDER" = "Title in another source";
+"PARALLEL_LINK_FOOTER" = "Pick the same title in another source. In the vertical reader, hold a page to see this source's page.";
+"PARALLEL_NO_RESULTS" = "Nothing found";
+"PARALLEL_ERROR_SOURCE" = "Source %@ is not installed";
+"PARALLEL_ERROR_NO_CHAPTERS" = "%@ returned no chapters for this title. Link the translation from another source (⋯ → Link Translation).";
+"PARALLEL_ERROR_CHAPTER" = "No chapter %@ in the linked source";
+"PARALLEL_ERROR_PAGES" = "Couldn't load pages";
+"PARALLEL_CHAPTER_PAGE" = "Ch. %@ · p. %d/%d";

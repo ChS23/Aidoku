@@ -1,0 +1,188 @@
+//
+//  ParallelLinkView.swift
+//  Aidoku
+//
+//  Lets the user pick the same title in another installed source
+//  (e.g. the Russian translation) to show while holding a page in the reader.
+//
+
+import AidokuRunner
+import SwiftUI
+
+struct ParallelLinkView: View {
+    let manga: AidokuRunner.Manga
+
+    // presented through SwiftUINavigationViewController, which dismisses via the coordinator
+    @EnvironmentObject private var path: NavigationCoordinator
+
+    @State private var query: String
+    @State private var currentLink: ParallelLink?
+    @State private var sourceNames: [String: String] = [:]
+    @State private var results: [SourceResults] = []
+    @State private var isLoading = false
+    @State private var searchTask: Task<Void, Never>?
+
+    private struct SourceResults: Identifiable {
+        let source: AidokuRunner.Source
+        let entries: [AidokuRunner.Manga]
+        var id: String { source.key }
+    }
+
+    init(manga: AidokuRunner.Manga) {
+        self.manga = manga
+        self._query = State(initialValue: manga.title)
+        self._currentLink = State(initialValue: ParallelLinkStore.link(for: manga))
+    }
+
+    var body: some View {
+        List {
+            if let currentLink {
+                Section(NSLocalizedString("PARALLEL_LINKED_TO")) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(currentLink.title)
+                        Text(sourceNames[currentLink.sourceKey] ?? currentLink.sourceKey)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button(role: .destructive) {
+                        ParallelLinkStore.setLink(nil, for: manga)
+                        self.currentLink = nil
+                    } label: {
+                        Text(NSLocalizedString("PARALLEL_UNLINK"))
+                    }
+                }
+            }
+
+            Section {
+                TextField(NSLocalizedString("PARALLEL_SEARCH_PLACEHOLDER"), text: $query)
+                    .disableAutocorrection(true)
+                    .submitLabel(.search)
+                    .onSubmit { search() }
+            } footer: {
+                Text(NSLocalizedString("PARALLEL_LINK_FOOTER"))
+            }
+
+            if isLoading {
+                Section {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                }
+            }
+
+            ForEach(results) { group in
+                Section(group.source.name) {
+                    ForEach(group.entries, id: \.key) { entry in
+                        Button {
+                            select(entry, source: group.source)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.title)
+                                    .foregroundStyle(.primary)
+                                if let authors = entry.authors, !authors.isEmpty {
+                                    Text(authors.joined(separator: ", "))
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !isLoading && results.isEmpty {
+                Section {
+                    Text(NSLocalizedString("PARALLEL_NO_RESULTS"))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .navigationTitle(NSLocalizedString("PARALLEL_LINK"))
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            search()
+        }
+        .onDisappear {
+            searchTask?.cancel()
+        }
+    }
+
+    private func select(_ entry: AidokuRunner.Manga, source: AidokuRunner.Source) {
+        let link = ParallelLink(sourceKey: source.key, mangaKey: entry.key, title: entry.title)
+        ParallelLinkStore.setLink(link, for: manga)
+        currentLink = link
+        searchTask?.cancel()
+        path.dismiss()
+    }
+
+    private func search() {
+        searchTask?.cancel()
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let currentSourceKey = manga.sourceKey
+
+        searchTask = Task {
+            isLoading = true
+            results = []
+
+            // installed sources other than the one this manga comes from
+            var sources: [AidokuRunner.Source] = []
+            for info in await SourceManager.shared.getSourceInfos(includeDisabled: false) {
+                guard
+                    info.sourceId != currentSourceKey,
+                    let source = await SourceManager.shared.source(for: info.sourceId)
+                else { continue }
+                sources.append(source)
+            }
+            // show sources in the reader's likely target language first
+            sources.sort { lhs, rhs in
+                lhs.languages.contains("ru") && !rhs.languages.contains("ru")
+            }
+            sourceNames = Dictionary(sources.map { ($0.key, $0.name) }, uniquingKeysWith: { first, _ in first })
+            if let source = await SourceManager.shared.source(for: currentSourceKey) {
+                sourceNames[source.key] = source.name
+            }
+            if let currentLink, sourceNames[currentLink.sourceKey] == nil,
+               let source = await SourceManager.shared.source(for: currentLink.sourceKey) {
+                sourceNames[source.key] = source.name
+            }
+
+            // sources freeze if too many searches run at once, so limit concurrency
+            let maxConcurrentTasks = 3
+            let maxEntriesPerSource = 6
+            await withTaskGroup(of: (AidokuRunner.Source, [AidokuRunner.Manga]).self) { group in
+                for source in sources.prefix(maxConcurrentTasks) {
+                    group.addTask {
+                        let result = try? await source.getSearchMangaList(query: text, page: 1, filters: [])
+                        return (source, result?.entries ?? [])
+                    }
+                }
+                var index = maxConcurrentTasks
+                while let (source, entries) = await group.next() {
+                    if index < sources.count {
+                        let next = sources[index]
+                        group.addTask {
+                            let result = try? await next.getSearchMangaList(query: text, page: 1, filters: [])
+                            return (next, result?.entries ?? [])
+                        }
+                        index += 1
+                    }
+                    guard !Task.isCancelled else { continue }
+                    if !entries.isEmpty {
+                        let ordered = sources.map(\.key)
+                        // some sources return dozens of loose matches; the right one is near the top
+                        results.append(.init(source: source, entries: Array(entries.prefix(maxEntriesPerSource))))
+                        results.sort {
+                            (ordered.firstIndex(of: $0.source.key) ?? 0) < (ordered.firstIndex(of: $1.source.key) ?? 0)
+                        }
+                    }
+                }
+            }
+
+            guard !Task.isCancelled else { return }
+            isLoading = false
+        }
+    }
+}

@@ -591,6 +591,11 @@ extension MangaView {
                 let viewController = SwiftUINavigationViewController(rootView: migrateView)
                 path.present(viewController)
             },
+            linkTranslation: {
+                let linkView = ParallelLinkView(manga: viewModel.manga)
+                let viewController = SwiftUINavigationViewController(rootView: linkView)
+                path.present(viewController)
+            },
             showShareSheet: showShareSheet(item:),
             removeDownloads: {
                 showRemoveAllConfirm = true
@@ -885,6 +890,7 @@ private struct RightNavbarButton: View, Equatable {
     private let url: URL?
     private let hasDownloads: Bool
     private let canDownload: Bool
+    private let canLinkTranslation: Bool
     private let isEditing: Bool
     private let refresh: () async -> Void
 
@@ -894,6 +900,7 @@ private struct RightNavbarButton: View, Equatable {
     let downloadUnread: (Int?) -> Void
     let editCategories: () -> Void
     let migrate: () -> Void
+    let linkTranslation: () -> Void
     let showShareSheet: (URL) -> Void
     let removeDownloads: () -> Void
 
@@ -908,6 +915,7 @@ private struct RightNavbarButton: View, Equatable {
         downloadUnread: @escaping (Int?) -> Void,
         editCategories: @escaping () -> Void,
         migrate: @escaping () -> Void,
+        linkTranslation: @escaping () -> Void,
         showShareSheet: @escaping (URL) -> Void,
         removeDownloads: @escaping () -> Void,
         editMode: Binding<EditMode>
@@ -919,6 +927,7 @@ private struct RightNavbarButton: View, Equatable {
         self.canDownload = viewModel.source != nil
             && !viewModel.manga.isLocal()
             && !(viewModel.manga.chapters?.isEmpty ?? true)
+        self.canLinkTranslation = viewModel.source != nil && !viewModel.manga.isLocal()
         self.refresh = refreshController.refresh
 
         self.markAllRead = markAllRead
@@ -927,6 +936,7 @@ private struct RightNavbarButton: View, Equatable {
         self.downloadUnread = downloadUnread
         self.editCategories = editCategories
         self.migrate = migrate
+        self.linkTranslation = linkTranslation
         self.showShareSheet = showShareSheet
         self.removeDownloads = removeDownloads
 
@@ -1000,6 +1010,15 @@ private struct RightNavbarButton: View, Equatable {
                         } label: {
                             Label(NSLocalizedString("MIGRATE"), systemImage: "arrow.left.arrow.right")
                         }
+                    }
+                    if canLinkTranslation {
+                        Button {
+                            linkTranslation()
+                        } label: {
+                            Label(NSLocalizedString("PARALLEL_LINK"), systemImage: "character.book.closed")
+                        }
+                    }
+                    if bookmarked {
                         if #available(iOS 18.0, *) { // only for system versions supporting swipe down to dismiss
                             Button {
                                 Task {

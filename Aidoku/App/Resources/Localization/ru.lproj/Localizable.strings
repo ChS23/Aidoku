@@ -650,3 +650,16 @@
 "NO_CURRENT_STREAK_TEXT" = "Читайте каждый день, чтобы накопить серию.";
 "LONGEST_STREAK" = "Длиннейшая серия";
 "FILTER_SEPARATOR" = ", ";
+
+// MARK: - Parallel translation
+"PARALLEL_LINK" = "Связать с переводом";
+"PARALLEL_LINKED_TO" = "Связано с";
+"PARALLEL_UNLINK" = "Отвязать";
+"PARALLEL_SEARCH_PLACEHOLDER" = "Название в другом источнике";
+"PARALLEL_LINK_FOOTER" = "Выберите тот же тайтл в другом источнике. В вертикальной ленте удерживайте страницу, чтобы увидеть страницу из этого источника.";
+"PARALLEL_NO_RESULTS" = "Ничего не найдено";
+"PARALLEL_ERROR_SOURCE" = "Источник %@ не установлен";
+"PARALLEL_ERROR_NO_CHAPTERS" = "%@ не отдаёт главы этого тайтла. Свяжите перевод из другого источника (⋯ → «Связать с переводом»).";
+"PARALLEL_ERROR_CHAPTER" = "В связанном источнике нет главы %@";
+"PARALLEL_ERROR_PAGES" = "Не удалось загрузить страницы";
+"PARALLEL_CHAPTER_PAGE" = "Гл. %@ · стр. %d/%d";

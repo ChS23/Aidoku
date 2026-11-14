@@ -61,6 +61,10 @@ class ReaderWebtoonViewController: ZoomableCollectionViewController {
     // Stores the last calculated page number
     private var previousPage = 0
 
+    // hold to show the page from a linked source (e.g. the translation)
+    private lazy var parallelOverlay = ParallelPageOverlayView()
+    private var parallelTask: Task<Void, Never>?
+
     private var autoScrollDisplayLink: CADisplayLink?
     private var autoScrollLastTimestamp: CFTimeInterval?
     private var autoScrollPausedForUserInteraction = false
@@ -96,6 +100,7 @@ class ReaderWebtoonViewController: ZoomableCollectionViewController {
 
         collectionNode.delegate = self
         collectionNode.dataSource = self
+        setupParallelHold()
 //        collectionNode.view.prefetchDataSource = self
 //        collectionNode.isPrefetchingEnabled = true
 
@@ -464,7 +469,8 @@ extension ReaderWebtoonViewController: UIContextMenuInteractionDelegate {
             let indexPath = collectionNode.indexPathForItem(at: point),
             let node = collectionNode.nodeForItem(at: indexPath) as? ReaderWebtoonPageNode,
             let image = node.imageNode.image,
-            !AppSettings.dictionary.isReaderQuickActionsDisabled(language: node.page.language)
+            !AppSettings.dictionary.isReaderQuickActionsDisabled(language: node.page.language),
+            parallelLink == nil // holding a page shows the linked page instead
         else {
             return nil
         }
@@ -938,6 +944,7 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
 
     func setChapter(_ chapter: AidokuRunner.Chapter, startPage: Int) {
         self.chapter = chapter
+        prefetchParallel(for: chapter)
         updateDoubleTapZoomSetting()
         chapters = [chapter]
 
@@ -1067,5 +1074,104 @@ extension ReaderWebtoonViewController: ASCollectionDataSource {
                 )
             }
         }
+    }
+}
+
+// MARK: - Parallel Translation
+// Holding a page shows the matching page from the linked source (see ParallelLinkStore).
+extension ReaderWebtoonViewController: UIGestureRecognizerDelegate {
+    private var parallelLink: ParallelLink? {
+        ParallelLinkStore.link(for: viewModel.manga)
+    }
+
+    func setupParallelHold() {
+        let gesture = UILongPressGestureRecognizer(target: self, action: #selector(handleParallelHold(_:)))
+        gesture.minimumPressDuration = 0.35
+        gesture.delegate = self
+        view.addGestureRecognizer(gesture)
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer is UILongPressGestureRecognizer else { return true }
+        return parallelLink != nil
+    }
+
+    private func prefetchParallel(for chapter: AidokuRunner.Chapter) {
+        guard let link = parallelLink else { return }
+        Task {
+            await ParallelPageResolver.shared.prefetch(link: link, chapter: chapter)
+        }
+    }
+
+    @objc private func handleParallelHold(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+            case .began:
+                beginParallelHold(gesture)
+            case .changed:
+                parallelOverlay.moveFinger(to: gesture.location(in: view).y)
+            default:
+                endParallelHold()
+        }
+    }
+
+    private func beginParallelHold(_ gesture: UILongPressGestureRecognizer) {
+        guard let link = parallelLink else { return }
+        let point = gesture.location(in: collectionNode.view)
+        guard
+            let indexPath = collectionNode.indexPathForItem(at: point),
+            let node = collectionNode.nodeForItem(at: indexPath) as? ReaderWebtoonPageNode,
+            let chapter = chapters[safe: indexPath.section],
+            let sectionPages = pages[safe: indexPath.section]
+        else {
+            return
+        }
+
+        // Page.index isn't reliable here (source pages often all have index 0),
+        // so count the image pages before this cell in the section instead
+        let imagePageCount = sectionPages.filter { $0.type == .imagePage }.count
+        let pageIndex = sectionPages.prefix(indexPath.item).filter { $0.type == .imagePage }.count
+        let frame = node.view.convert(node.view.bounds, to: collectionNode.view)
+        let fraction = frame.height > 0 ? min(max((point.y - frame.minY) / frame.height, 0), 1) : 0
+        let position = ParallelPageResolver.Position(
+            pageIndex: pageIndex,
+            pageCount: max(imagePageCount, 1),
+            fraction: fraction
+        )
+
+        if parallelOverlay.superview == nil {
+            parallelOverlay.frame = view.bounds
+            parallelOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.addSubview(parallelOverlay)
+        }
+        view.bringSubviewToFront(parallelOverlay)
+        parallelOverlay.begin(at: gesture.location(in: view).y)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+        parallelTask?.cancel()
+        parallelTask = Task { [weak self] in
+            do {
+                let result = try await ParallelPageResolver.shared.resolve(
+                    link: link,
+                    chapter: chapter,
+                    position: position
+                )
+                guard !Task.isCancelled, let self else { return }
+                self.parallelOverlay.show(
+                    images: result.images,
+                    targetImageIndex: result.targetImageIndex,
+                    fraction: result.fraction,
+                    label: result.label
+                )
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                self.parallelOverlay.show(error: error.localizedDescription)
+            }
+        }
+    }
+
+    private func endParallelHold() {
+        parallelTask?.cancel()
+        parallelTask = nil
+        parallelOverlay.end()
     }
 }

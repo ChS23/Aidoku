@@ -21,6 +21,7 @@ struct ParallelLinkView: View {
     @State private var results: [SourceResults] = []
     @State private var isLoading = false
     @State private var searchTask: Task<Void, Never>?
+    @State private var alternativeTitles: [String] = []
 
     private struct SourceResults: Identifiable {
         let source: AidokuRunner.Source
@@ -59,7 +60,15 @@ struct ParallelLinkView: View {
                     .submitLabel(.search)
                     .onSubmit { search() }
             } footer: {
-                Text(NSLocalizedString("PARALLEL_LINK_FOOTER"))
+                VStack(alignment: .leading, spacing: 6) {
+                    if !alternativeTitles.isEmpty {
+                        Text(String(
+                            format: NSLocalizedString("PARALLEL_ALSO_SEARCHING"),
+                            alternativeTitles.joined(separator: " · ")
+                        ))
+                    }
+                    Text(NSLocalizedString("PARALLEL_LINK_FOOTER"))
+                }
             }
 
             if isLoading {
@@ -149,24 +158,30 @@ struct ParallelLinkView: View {
                 sourceNames[source.key] = source.name
             }
 
+            // the same series is often listed under a different name in other languages,
+            // so also search by alternative titles (only when searching the series' own title)
+            var queries = [text]
+            if text == manga.title {
+                let alternatives = await ParallelTitleLookup.alternativeTitles(for: text)
+                guard !Task.isCancelled else { return }
+                alternativeTitles = alternatives
+                queries += alternatives
+            } else {
+                alternativeTitles = []
+            }
+
             // sources freeze if too many searches run at once, so limit concurrency
             let maxConcurrentTasks = 3
             let maxEntriesPerSource = 6
             await withTaskGroup(of: (AidokuRunner.Source, [AidokuRunner.Manga]).self) { group in
                 for source in sources.prefix(maxConcurrentTasks) {
-                    group.addTask {
-                        let result = try? await source.getSearchMangaList(query: text, page: 1, filters: [])
-                        return (source, result?.entries ?? [])
-                    }
+                    group.addTask { (source, await Self.search(source: source, queries: queries)) }
                 }
                 var index = maxConcurrentTasks
                 while let (source, entries) = await group.next() {
                     if index < sources.count {
                         let next = sources[index]
-                        group.addTask {
-                            let result = try? await next.getSearchMangaList(query: text, page: 1, filters: [])
-                            return (next, result?.entries ?? [])
-                        }
+                        group.addTask { (next, await Self.search(source: next, queries: queries)) }
                         index += 1
                     }
                     guard !Task.isCancelled else { continue }
@@ -184,5 +199,26 @@ struct ParallelLinkView: View {
             guard !Task.isCancelled else { return }
             isLoading = false
         }
+    }
+
+    /// Searches one source with every query, merging results without duplicates.
+    /// Exact title matches come first, then results in query order.
+    private static func search(source: AidokuRunner.Source, queries: [String]) async -> [AidokuRunner.Manga] {
+        var exact: [AidokuRunner.Manga] = []
+        var other: [AidokuRunner.Manga] = []
+        var seenKeys: Set<String> = []
+        let normalizedQueries = Set(queries.map(ParallelTitleLookup.normalize))
+        for query in queries {
+            guard !Task.isCancelled else { break }
+            let entries = (try? await source.getSearchMangaList(query: query, page: 1, filters: []))?.entries ?? []
+            for entry in entries where seenKeys.insert(entry.key).inserted {
+                if normalizedQueries.contains(ParallelTitleLookup.normalize(entry.title)) {
+                    exact.append(entry)
+                } else {
+                    other.append(entry)
+                }
+            }
+        }
+        return exact + other
     }
 }

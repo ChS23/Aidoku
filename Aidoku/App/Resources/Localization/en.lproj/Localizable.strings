@@ -883,6 +883,7 @@
 "PARALLEL_UNLINK" = "Unlink";
 "PARALLEL_SEARCH_PLACEHOLDER" = "Title in another source";
 "PARALLEL_LINK_FOOTER" = "Pick the same title in another source. In the vertical reader, hold a page to see this source's page.";
+"PARALLEL_ALSO_SEARCHING" = "Also searching: %@";
 "PARALLEL_NO_RESULTS" = "Nothing found";
 "PARALLEL_ERROR_SOURCE" = "Source %@ is not installed";
 "PARALLEL_ERROR_NO_CHAPTERS" = "%@ returned no chapters for this title. Link the translation from another source (⋯ → Link Translation).";

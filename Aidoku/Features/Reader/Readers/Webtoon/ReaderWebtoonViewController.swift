@@ -827,6 +827,7 @@ extension ReaderWebtoonViewController {
         delegate?.setChapter(chapter)
         delegate?.setPages(pages.filter({ $0.type == .imagePage }))
         viewModel.setPages(chapter: chapter, pages: pages)
+        prepareParallel(for: chapter, pages: pages)
     }
 
     /// Switch current chapter to next
@@ -842,6 +843,7 @@ extension ReaderWebtoonViewController {
         delegate?.setChapter(chapter)
         delegate?.setPages(pages.filter({ $0.type == .imagePage }))
         viewModel.setPages(chapter: chapter, pages: pages)
+        prepareParallel(for: chapter, pages: pages)
     }
 
     /// Refresh info page chapter info
@@ -944,13 +946,13 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
 
     func setChapter(_ chapter: AidokuRunner.Chapter, startPage: Int) {
         self.chapter = chapter
-        prefetchParallel(for: chapter)
         updateDoubleTapZoomSetting()
         chapters = [chapter]
 
         Task {
             await viewModel.loadPages(chapter: chapter)
             delegate?.setPages(viewModel.pages)
+            prepareParallel(for: chapter, pages: viewModel.pages)
             if viewModel.pages.isEmpty {
                 pages = []
                 await collectionNode.reloadData()
@@ -1096,10 +1098,18 @@ extension ReaderWebtoonViewController: UIGestureRecognizerDelegate {
         return parallelLink != nil
     }
 
-    private func prefetchParallel(for chapter: AidokuRunner.Chapter) {
+    /// Loads the linked chapter and aligns it with `pages` in the background.
+    private func prepareParallel(for chapter: AidokuRunner.Chapter, pages: [Page]) {
         guard let link = parallelLink else { return }
+        let imagePages = pages.filter { $0.type == .imagePage }.map { $0.toNew() }
+        let source = viewModel.source
         Task {
-            await ParallelPageResolver.shared.prefetch(link: link, chapter: chapter)
+            await ParallelPageResolver.shared.prepare(
+                link: link,
+                chapter: chapter,
+                readerPages: imagePages,
+                readerSource: source
+            )
         }
     }
 
@@ -1137,6 +1147,9 @@ extension ReaderWebtoonViewController: UIGestureRecognizerDelegate {
             pageCount: max(imagePageCount, 1),
             fraction: fraction
         )
+
+        // no-op if the alignment is ready or already being prepared (e.g. the link was just added)
+        prepareParallel(for: chapter, pages: sectionPages)
 
         if parallelOverlay.superview == nil {
             parallelOverlay.frame = view.bounds

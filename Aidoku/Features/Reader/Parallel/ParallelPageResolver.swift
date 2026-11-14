@@ -70,10 +70,20 @@ actor ParallelPageResolver {
         let pages = try await pageList(for: linkedChapter, manga: manga, source: source)
         guard !pages.isEmpty else { throw ResolveError.noPages }
 
-        // map the position proportionally; identical page counts map one-to-one
+        // use the image alignment when it's ready, otherwise map the position proportionally
         let targetIndex: Int
         let targetFraction: CGFloat
-        if pages.count == position.pageCount {
+        let alignmentKey = Self.alignmentKey(link: link, chapter: chapter)
+        if
+            let alignment = alignments[alignmentKey],
+            alignment.source.pageStarts.count == position.pageCount,
+            alignment.target.pageStarts.count == pages.count,
+            let sourceRow = alignment.source.row(page: position.pageIndex, fraction: position.fraction)
+        {
+            let aligned = alignment.target.page(atRow: alignment.targetRow(forSourceRow: sourceRow))
+            targetIndex = aligned.index
+            targetFraction = aligned.fraction
+        } else if pages.count == position.pageCount {
             targetIndex = min(max(position.pageIndex, 0), pages.count - 1)
             targetFraction = position.fraction
         } else {
@@ -86,6 +96,7 @@ actor ParallelPageResolver {
         LogManager.logger.info(
             "Parallel: position page \(position.pageIndex)/\(position.pageCount) fraction \(position.fraction)"
                 + " -> linked page \(targetIndex)/\(pages.count) fraction \(targetFraction)"
+                + (alignments[alignmentKey] != nil ? " (aligned)" : " (proportional)")
         )
 
         // load the target page first, then its neighbours (failures of neighbours are ignored)
@@ -110,12 +121,102 @@ actor ParallelPageResolver {
         return Result(images: images, targetImageIndex: targetImageIndex, fraction: targetFraction, label: label)
     }
 
-    /// Loads the chapter list of the linked manga in advance so the first hold is faster.
-    func prefetch(link: ParallelLink, chapter: AidokuRunner.Chapter) async {
+    /// Loads the linked chapter in advance and aligns it with the chapter being read,
+    /// so holds land on the matching spot instead of a proportional guess.
+    /// `readerPages` are the image pages of the chapter being read, in order.
+    func prepare(
+        link: ParallelLink,
+        chapter: AidokuRunner.Chapter,
+        readerPages: [AidokuRunner.Page],
+        readerSource: AidokuRunner.Source?
+    ) async {
+        let key = Self.alignmentKey(link: link, chapter: chapter)
+        guard alignments[key] == nil, !preparing.contains(key) else { return }
         guard let source = await SourceManager.shared.source(for: link.sourceKey) else { return }
         let manga = AidokuRunner.Manga(sourceKey: link.sourceKey, key: link.mangaKey, title: link.title)
-        guard let linkedChapter = try? await findChapter(matching: chapter, in: manga, source: source) else { return }
-        _ = try? await pageList(for: linkedChapter, manga: manga, source: source)
+        guard
+            let linkedChapter = try? await findChapter(matching: chapter, in: manga, source: source),
+            let linkedPages = try? await pageList(for: linkedChapter, manga: manga, source: source),
+            !linkedPages.isEmpty, !readerPages.isEmpty
+        else { return }
+
+        preparing.insert(key)
+        defer { preparing.remove(key) }
+        let start = Date()
+
+        // keep only a few chapter alignments in memory
+        if alignments.count >= 3, let oldest = alignmentOrder.first {
+            alignments[oldest] = nil
+            alignmentOrder.removeFirst()
+        }
+
+        async let readerPixels = loadAllPixels(pages: readerPages, source: readerSource)
+        async let linkedPixels = loadAllPixels(pages: linkedPages, source: source)
+        guard
+            let readerPixels = await readerPixels,
+            let linkedPixels = await linkedPixels
+        else {
+            LogManager.logger.info("Parallel: alignment skipped, some pages failed to load")
+            return
+        }
+
+        let alignment = await Task.detached(priority: .utility) { () -> ParallelAlignment? in
+            guard
+                let source = ParallelStrip(pages: readerPixels),
+                let target = ParallelStrip(pages: linkedPixels)
+            else { return nil }
+            return ParallelAlignment(source: source, target: target)
+        }.value
+        guard let alignment else { return }
+        alignments[key] = alignment
+        alignmentOrder.append(key)
+        LogManager.logger.info(
+            "Parallel: aligned \(readerPages.count) pages with \(linkedPages.count) linked pages"
+                + " in \(String(format: "%.1f", Date().timeIntervalSince(start)))s"
+        )
+    }
+
+    private var alignments: [String: ParallelAlignment] = [:]
+    private var alignmentOrder: [String] = []
+    private var preparing: Set<String> = []
+
+    private static func alignmentKey(link: ParallelLink, chapter: AidokuRunner.Chapter) -> String {
+        "\(link.sourceKey)|\(link.mangaKey)|\(chapter.key)"
+    }
+
+    /// Loads all pages (a few at a time) and reduces each to strip pixels right away,
+    /// so full-size images aren't kept in memory. Returns nil if any page fails.
+    private func loadAllPixels(pages: [AidokuRunner.Page], source: AidokuRunner.Source?) async -> [[Float]]? {
+        var images = [[Float]?](repeating: nil, count: pages.count)
+        let maxConcurrent = 4
+        let loaded: Bool = await withTaskGroup(of: (Int, [Float]?).self) { group in
+            var next = 0
+            func addNext() {
+                guard next < pages.count else { return }
+                let index = next
+                let page = pages[index]
+                next += 1
+                group.addTask {
+                    var image = try? await self.loadImage(page: page, source: source)
+                    if image == nil { // one retry
+                        image = try? await self.loadImage(page: page, source: source)
+                    }
+                    return (index, image.flatMap(ParallelStrip.grayPixels))
+                }
+            }
+            for _ in 0..<maxConcurrent { addNext() }
+            while let (index, image) = await group.next() {
+                guard let image else {
+                    group.cancelAll()
+                    return false
+                }
+                images[index] = image
+                addNext()
+            }
+            return true
+        }
+        guard loaded else { return nil }
+        return images.compactMap { $0 }
     }
 
     private func findChapter(
@@ -174,15 +275,19 @@ actor ParallelPageResolver {
         return pages
     }
 
-    private func loadImage(page: AidokuRunner.Page, source: AidokuRunner.Source) async throws -> UIImage {
+    private func loadImage(page: AidokuRunner.Page, source: AidokuRunner.Source?) async throws -> UIImage {
         switch page.content {
             case .image(let image):
                 return image
             case .url(let url, let context):
-                let urlRequest = await source.getModifiedImageRequest(url: url, context: context)
+                let urlRequest = if !url.isFileURL, let source {
+                    await source.getModifiedImageRequest(url: url, context: context)
+                } else {
+                    URLRequest(url: url)
+                }
                 var processors: [ImageProcessing] = []
-                let processesPages = source.features.processesPages
-                if processesPages {
+                let processesPages = !url.isFileURL && (source?.features.processesPages ?? false)
+                if processesPages, let source {
                     processors.append(PageInterceptorProcessor(source: source, pageContext: context))
                 }
                 let request = ImageRequest(
